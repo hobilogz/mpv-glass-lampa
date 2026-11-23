@@ -1,0 +1,15 @@
+# Ignore unpacked binaries in root (they are unpacked from bin/mpv-portable.7z)
+/mpv.exe
+/mpv.com
+/d3dcompiler_43.dll
+
+# MPV runtime files
+watch_later/
+*.log
+*.tmp
+*.bak
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
