@@ -1850,7 +1850,6 @@ end
 -- menus); an empty list turns the blur off
 local function glass_blur_update(rects)
     if glass_blur.path == nil or glass_blur.failed then return end
-    if not state.osc_visible and not state.wc_visible then rects = {} end
     if glass_blur.suspended or not glass_blur_active() then rects = {} end
     local d = state.osd_dimensions or {}
     local W, H = d.w or 0, d.h or 0
@@ -6718,6 +6717,170 @@ local function enable_osc(enable)
     end
 end
 
+local skip_intro = {section = "modernglass-skip-intro", ranges = {}}
+do
+    local label = "Пропустить заставку"
+    local shortcut = "Enter"
+    local titles = {
+        intro = true, introduction = true, opening = true, op = true,
+        ["opening credits"] = true, ["opening theme"] = true,
+        ["заставка"] = true, ["интро"] = true, ["опенинг"] = true,
+        ["вступительные титры"] = true,
+    }
+    local lowercase = {}
+    local upper = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+    local lower = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя"
+    for i = 1, #upper, 2 do
+        lowercase[upper:sub(i, i + 1)] = lower:sub(i, i + 1)
+    end
+
+    local function lower_title(text)
+        return (text:lower():gsub("[\208\209][\128-\191]", lowercase))
+    end
+
+    local function is_intro(text, first_chapter)
+        text = lower_title(text or ""):gsub("^%s*%d+[%.%)%-:%s]+", "")
+        text = text:gsub("[%s_%-]+", " "):match("^%s*(.-)%s*$")
+        text = text:gsub("%s*[%[(].-$", ""):gsub("%s*%d+$", "")
+        return titles[text] == true or (first_chapter and (text == "start" or text == "старт"))
+    end
+
+    function skip_intro.read_chapters()
+        if not skip_intro.loaded then return end
+        skip_intro.ranges = {}
+        local chapters = state.chapter_list
+        for i, chapter in ipairs(chapters) do
+            local next_chapter = chapters[i + 1]
+            if next_chapter and is_intro(chapter.title, i == 1) then
+                local target = next_chapter.time - 1
+                if target > chapter.time then
+                    skip_intro.ranges[#skip_intro.ranges + 1] = {chapter.time, target}
+                end
+            end
+        end
+        request_tick()
+    end
+
+    local function target_at(time)
+        if not time then return end
+        for _, range in ipairs(skip_intro.ranges) do
+            if time >= range[1] and time < range[2] then return range[2] end
+        end
+    end
+
+    local function skip()
+        if not skip_intro.rect or menu or skip_intro.console
+            or not mp.get_property_bool("seekable", false) then return end
+        local target = target_at(mp.get_property_number("time-pos"))
+        if target then mp.commandv("seek", target, "absolute+exact") end
+    end
+
+    function skip_intro.hide()
+        if not skip_intro.rect then return end
+        skip_intro.rect = nil
+        skip_intro.hovered = false
+        mp.disable_key_bindings(skip_intro.section)
+        mp.remove_key_binding("skip-intro-enter")
+        mp.remove_key_binding("skip-intro-keypad-enter")
+    end
+
+    local function pointer_over()
+        local rect = skip_intro.rect
+        local mouse = mp.get_property_native("mouse-pos")
+        if not rect or not mouse or not mouse.hover then return false end
+        local sx, sy = get_virt_scale_factor()
+        local x, y = mouse.x * sx, mouse.y * sy
+        return x >= rect[1] and x < rect[1] + rect[3]
+            and y >= rect[2] and y < rect[2] + rect[4]
+    end
+
+    function skip_intro.update()
+        local time = frame_number("time-pos")
+        if not skip_intro.loaded or not skip_intro.seekable or not target_at(time)
+            or state.idle_active or state.is_image or menu or menu_closing or skip_intro.console
+            or not (state.osd_dimensions.w > 0 and state.osd_dimensions.h > 0) then
+            skip_intro.hide()
+            return
+        end
+
+        local panel = state.panel_rect
+        local width = math.ceil(math.max(155, estimate_text_width(label, osc_styles.glass_title))
+            + math.max(30, estimate_text_width(shortcut, osc_styles.glass_chapter)) + 46)
+        local height = 38
+        local right = (panel and panel.x2 or osc_param.playresx - 14) - 12
+        local top = math.max(8, (panel and panel.y1 or osc_param.playresy - 70) - height - 10)
+        local left = right - width
+        if left < 8 then
+            skip_intro.hide()
+            return
+        end
+
+        local rect = skip_intro.rect
+        local dw, dh = state.osd_dimensions.w, state.osd_dimensions.h
+        if not rect or rect[1] ~= left or rect[2] ~= top or rect[3] ~= width
+            or skip_intro.display_w ~= dw or skip_intro.display_h ~= dh then
+            skip_intro.rect = {left, top, width, height, height / 2}
+            skip_intro.display_w, skip_intro.display_h = dw, dh
+            set_virt_mouse_area(left, top, right, top + height, skip_intro.section)
+        end
+        if not rect then
+            mp.enable_key_bindings(skip_intro.section, "allow-hide-cursor")
+            mp.add_key_binding("ENTER", "skip-intro-enter", skip)
+            mp.add_key_binding("KP_ENTER", "skip-intro-keypad-enter", skip)
+        end
+        skip_intro.hovered = pointer_over()
+    end
+
+    function skip_intro.draw(ass)
+        local rect = skip_intro.rect
+        if not rect then return end
+        local x, y, w, h, r = unpack(rect)
+        glass_rect(ass, x, y, w, h, r, {
+            fill_alpha = glass_fill_alpha(skip_intro.hovered and 58 or nil),
+            shadow = not glass_blur_active(),
+        })
+        ass:new_event()
+        ass:pos(x + 15, y + h / 2)
+        ass:an(4)
+        ass:append(osc_styles.glass_title .. label)
+        ass:new_event()
+        ass:pos(x + w - 15, y + h / 2)
+        ass:an(6)
+        ass:append(osc_styles.glass_chapter .. shortcut)
+    end
+
+    function skip_intro.reset()
+        skip_intro.loaded = false
+        skip_intro.ranges = {}
+        skip_intro.hide()
+    end
+
+    mp.set_key_bindings({
+        {"MBTN_LEFT", function()
+            if pointer_over() then skip() end
+        end, function() end},
+        {"MBTN_LEFT_DBL", "ignore"},
+    }, skip_intro.section, "force")
+    mp.observe_property("mouse-pos", "native", function()
+        if skip_intro.rect and skip_intro.hovered ~= pointer_over() then request_tick() end
+    end)
+    mp.observe_property("seekable", "bool", function(_, seekable)
+        skip_intro.seekable = seekable
+        request_tick()
+    end)
+    mp.observe_property("user-data/mpv/console/open", "bool", function(_, open)
+        skip_intro.console = open
+        request_tick()
+    end)
+    mp.register_event("file-loaded", function()
+        skip_intro.loaded = true
+        skip_intro.read_chapters()
+    end)
+    mp.register_event("start-file", skip_intro.reset)
+    mp.register_event("end-file", skip_intro.reset)
+end
+
+
 local function render()
     msg.trace("rendering")
     menu_frame = menu_frame + 1
@@ -6867,9 +7030,12 @@ local function render()
         request_tick()
     end
 
+    skip_intro.update()
+
     -- blur the video behind the visible glass surfaces (vo=gpu-next)
     if glass_blur.path then
         local rects = {}
+        if skip_intro.rect then rects[#rects + 1] = skip_intro.rect end
         if glass_blur_active() and state.glass_ui and not state.idle_active then
             -- the frost fades in and out with its surface
             local p = state.panel_rect
@@ -6901,6 +7067,7 @@ local function render()
     end
     if menu_closing and state.osc_visible then render_menu(ass, menu_closing) end
     menu_covers_sync()
+    skip_intro.draw(ass)
 
     if user_opts.persistent_progress or state.persistent_progress_toggle then
         render_persistent_progress(ass)
@@ -6974,6 +7141,8 @@ tick = function()
         render()
     else
         -- Flush OSD
+        skip_intro.hide()
+        glass_blur_update({})
         render_wipe(state.osd)
         render_wipe(state.logo_osd)
     end
@@ -7030,6 +7199,7 @@ observe_cached("playlist-pos-1", request_init)
 observe_cached("chapter-list", function ()
     state.chapter_list = state.chapter_list or {}
     table.sort(state.chapter_list, function(a, b) return a.time < b.time end)
+    skip_intro.read_chapters()
     request_init()
 end)
 observe_cached("duration", function ()
@@ -7215,6 +7385,7 @@ local function visibility_mode(mode, no_osd)
         return
     end
 
+    if mode == "never" then skip_intro.hide() end
     user_opts.visibility = mode
     mp.set_property_native("user-data/osc/visibility", mode)
 
